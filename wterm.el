@@ -28,6 +28,8 @@
 (require 'subr-x)
 (require 'ansi-color)
 (require 'url-util)
+(require 'compile)
+(require 'seq)
 
 (defgroup wterm nil
   "Terminal emulator for Windows."
@@ -95,11 +97,65 @@ Changes take effect when wterm.el is reloaded."
 
 (defvar wterm-module-file (expand-file-name "wterm-module.dll" wterm-install-directory))
 
-(unless (featurep 'wterm-module)
-  (dolist (file (list wterm-module-file wterm-conpty-program))
-    (unless (file-exists-p file)
-      (error "wterm: %s not found" file)))
-  (module-load wterm-module-file))
+(defun wterm--built-p ()
+  "Non-nil when the module and the ConPTY bridge exist."
+  (and (file-exists-p wterm-module-file)
+       (file-exists-p wterm-conpty-program)))
+
+;;;###autoload
+(defun wterm-compile ()
+  "Build the wterm module and ConPTY bridge using MSYS2.
+Installs gcc, make and libvterm with pacman if missing, then runs make
+in the wterm directory.  The module is loaded when the build succeeds."
+  (interactive)
+  (let* ((msys (read-directory-name "MSYS2 installation directory: "
+                                    "C:/" nil t "msys64"))
+         (bash (expand-file-name "usr/bin/bash.exe" msys))
+         (_ (unless (file-exists-p bash)
+              (user-error "wterm: %s not found" bash)))
+         (src (directory-file-name wterm-install-directory))
+         (cmd (format (concat "cd '%s' && "
+                              "pacman -S --needed --noconfirm make "
+                              "mingw-w64-x86_64-gcc mingw-w64-x86_64-libvterm "
+                              "&& make")
+                      src))
+         (shell-file-name bash)
+         (shell-command-switch "-lc")
+         (compilation-environment
+          (append '("MSYSTEM=MINGW64" "CHERE_INVOKING=1")
+                  compilation-environment))
+         (default-directory wterm-install-directory)
+         (buf (compilation-start cmd nil (lambda (_) "*wterm-compile*"))))
+    (with-current-buffer buf
+      (add-hook 'compilation-finish-functions #'wterm--compile-finished nil t))
+    buf))
+
+(defun wterm--compile-finished (buf status)
+  "Load the module after a successful build in BUF; STATUS is the result."
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      (remove-hook 'compilation-finish-functions #'wterm--compile-finished t)))
+  (if (and (string-prefix-p "finished" status) (wterm--built-p))
+      (progn (wterm--load-module)
+             (message "wterm: build finished, run M-x wterm"))
+    (message "wterm: build failed, see %s" (buffer-name buf))))
+
+(defun wterm--load-module ()
+  "Load the module unless it is already loaded."
+  (unless (featurep 'wterm-module)
+    (module-load wterm-module-file)))
+
+(defun wterm--ensure-module ()
+  "Load the module, offering to build it first when it is missing."
+  (cond ((featurep 'wterm-module))
+        ((wterm--built-p) (wterm--load-module))
+        ((y-or-n-p "wterm: module is not built.  Build it with MSYS2 now? ")
+         (wterm-compile)
+         (user-error "wterm: building, run `M-x wterm' again when it finishes"))
+        (t (user-error "wterm: %s not found" wterm-module-file))))
+
+(when (wterm--built-p)
+  (wterm--load-module))
 
 (declare-function wterm--new "wterm-module")
 (declare-function wterm--write-input "wterm-module")
@@ -213,6 +269,7 @@ Changes take effect when wterm.el is reloaded."
   "Start a terminal running `wterm-shell' in a new buffer.
 With prefix ARG, ask for the command to run."
   (interactive "P")
+  (wterm--ensure-module)
   (let* ((command (if arg
                       (read-shell-command "Run in terminal: " wterm-shell)
                     wterm-shell))
