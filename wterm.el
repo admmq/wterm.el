@@ -114,15 +114,12 @@ in the wterm directory.  The module is loaded when the build succeeds."
          (_ (unless (file-exists-p bash)
               (user-error "wterm: %s not found" bash)))
          (src (directory-file-name wterm-install-directory))
-         (cmd (format (concat "cd '%s' && "
-                              "pacman -S --needed --noconfirm make "
-                              "mingw-w64-x86_64-gcc mingw-w64-x86_64-libvterm "
-                              "&& make")
+         (cmd (format "cd '%s' && mingw32-make.exe"
                       src))
          (shell-file-name bash)
          (shell-command-switch "-lc")
          (compilation-environment
-          (append '("MSYSTEM=MINGW64" "CHERE_INVOKING=1")
+          (append '("MSYSTEM=UCRT64" "CHERE_INVOKING=1")
                   compilation-environment))
          (default-directory wterm-install-directory)
          (buf (compilation-start cmd nil (lambda (_) "*wterm-compile*"))))

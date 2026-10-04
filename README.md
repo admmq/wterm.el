@@ -12,53 +12,23 @@ you are welcome.
 
 # wterm.el: Windows terminal for Emacs
 
-A vterm-style terminal emulator for native Windows Emacs. Requires Windows 10
-1809 or newer.
+A vterm-style terminal emulator for native Windows Emacs. Tested on Windows 11.
+
+## Before installation
+Install MSYS2. Then open MSYS2 UCRT64 console and install dependencies:
+```bash
+pacman -S mingw-w64-ucrt-x86_64-toolchain mingw-w64-ucrt-x86_64-emacs mingw-w64-ucrt-x86_64-libvterm mingw-w64-ucrt-x86_64-git
+```
 
 ## Install from GitHub
 
-With Emacs 30+ (`use-package` has `:vc` built in):
-
 ```elisp
 (use-package wterm
-  :vc (:url "https://github.com/admmq/wterm.el.git" :rev :newest)
+  :vc (:url "https://github.com/admmq/wterm.el.git" :rev "main")
   :commands (wterm wterm-other-window wterm-compile))
 ```
 
-On first start, run `M-x wterm`. It notices the module isn't built and
-offers to build it with MSYS2 (see below). Install [msys2](https://www.msys2.org)
-first. When the build finishes, run `M-x wterm` again.
-
-On Emacs 29, install `package-vc` support with `M-x package-vc-install RET
-https://github.com/admmq/wterm.el.git`, then use plain `(use-package wterm
-:commands (wterm wterm-other-window wterm-compile))`.
-
-To update, run `M-x package-vc-upgrade RET wterm`, then `M-x wterm-compile`
-if the C sources changed (restart Emacs afterwards if the old module was loaded).
-
-## Build
-
-Install [msys2](https://www.msys2.org). After run Msys2 MINGW64 app,
-enter the source directory and install dependencies:
-
-```sh
-pacman -S --needed mingw-w64-x86_64-gcc mingw-w64-x86_64-libvterm
-```
-
-Then run `make.exe` in this directory. It builds `wterm-module.dll` and
-`wterm-conpty.exe`.
-
-Or build from Emacs: `M-x wterm-compile` asks where MSYS2 is installed,
-installs the dependencies and runs
-make. `M-x wterm` offers to do this when the module is missing, so
-installing with `use-package :vc` works without manual steps.
-
 ## Use
-
-```elisp
-(add-to-list 'load-path "c:/path/to/wterm/source")
-(autoload 'wterm "wterm" nil t)
-```
 
 `M-x wterm` opens a terminal running `wterm-shell` (pwsh by default, then
 powershell, then cmd.exe). `C-u M-x wterm` asks which command to run.
@@ -81,6 +51,3 @@ Most keys go to the terminal. `C-c`, `C-x`, `C-u`, `C-g`, `C-h`, `M-x` and
 - Lines already in the scrollback are not re-wrapped when the window width
   changes.
 - Mouse reporting to terminal programs is not implemented.
-- In PowerShell, each keystroke takes about 16 ms to show up, because the
-  ConPTY built into Windows holds some output until its next 60 Hz frame.
-  MSYS2 bash takes 1–16 ms.
