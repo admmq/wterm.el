@@ -24,7 +24,9 @@ pacman -S mingw-w64-ucrt-x86_64-toolchain mingw-w64-ucrt-x86_64-emacs mingw-w64-
 
 ```elisp
 (use-package wterm
-  :vc (:url "https://github.com/admmq/wterm.el.git" :rev "main")
+  :vc (:url "https://github.com/admmq/wterm.el.git"
+       :branch "main"
+       :rev :newest)
   :commands (wterm wterm-other-window wterm-compile))
 ```
 
