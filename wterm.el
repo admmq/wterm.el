@@ -87,6 +87,15 @@ The shell has to report it with OSC 7 (file://host/path), OSC 9;9
   "Ring the Emacs bell when the terminal rings."
   :type 'boolean)
 
+(defcustom wterm-minimum-contrast 4.5
+  "Minimum contrast ratio between terminal text and its background.
+Colors chosen by programs that are too close to their background, such
+as yellow or grey text on a light theme, are darkened or lightened until
+they reach this WCAG contrast ratio (1 to 21; 4.5 is the WCAG minimum
+for normal text).  nil turns the adjustment off.  Changes apply to new
+terminals and after a theme change."
+  :type '(choice (const :tag "Off" nil) number))
+
 (defcustom wterm-keymap-exceptions
   '("C-c" "C-x" "C-u" "C-g" "C-h" "C-y" "M-x" "M-:" "M-w")
   "Keys that keep their Emacs binding instead of going to the terminal.
@@ -162,6 +171,7 @@ in the wterm directory.  The module is loaded when the build succeeds."
 (declare-function wterm--char "wterm-module")
 (declare-function wterm--paste "wterm-module")
 (declare-function wterm--set-palette "wterm-module")
+(declare-function wterm--set-contrast "wterm-module")
 (declare-function wterm--clear-scrollback "wterm-module")
 (declare-function wterm--pop-events "wterm-module")
 
@@ -314,7 +324,7 @@ With prefix ARG, ask for the command to run."
          (inhibit-read-only t))
     (erase-buffer)
     (setq wterm--term (wterm--new rows cols wterm-max-scrollback))
-    (wterm--set-palette wterm--term (wterm--palette))
+    (wterm--set-colors)
     (setq wterm--process
           (make-process
            :name "wterm"
@@ -330,10 +340,17 @@ With prefix ARG, ask for the command to run."
                  #'wterm--adjust-process-window-size)
     (wterm--redraw-now (current-buffer))))
 
+(defun wterm--hex-color (color)
+  "COLOR as a \"#rrggbb\" string, or nil if it isn't a known color."
+  (when-let* ((values (and color (color-values color))))
+    (apply #'format "#%02x%02x%02x"
+           (mapcar (lambda (v) (/ v 257)) values))))
+
 (defun wterm--palette ()
   "The 16 ANSI colors of the current theme."
   (vconcat
-   (mapcar (lambda (face) (face-foreground face nil 'default))
+   (mapcar (lambda (face)
+             (wterm--hex-color (face-foreground face nil 'default)))
            '(ansi-color-black ansi-color-red ansi-color-green
              ansi-color-yellow ansi-color-blue ansi-color-magenta
              ansi-color-cyan ansi-color-white ansi-color-bright-black
@@ -342,12 +359,23 @@ With prefix ARG, ask for the command to run."
              ansi-color-bright-magenta ansi-color-bright-cyan
              ansi-color-bright-white))))
 
+(defun wterm--set-colors ()
+  "Pass the theme's colors to the terminal of the current buffer."
+  (wterm--set-palette wterm--term (wterm--palette))
+  ;; A module built before contrast adjustment existed lacks this.
+  (when (fboundp 'wterm--set-contrast)
+    (wterm--set-contrast wterm--term
+                         (wterm--hex-color (face-foreground 'default))
+                         (wterm--hex-color (face-background 'default))
+                         (and wterm-minimum-contrast
+                              (float wterm-minimum-contrast)))))
+
 (defun wterm--update-palettes (&rest _)
   "Refresh the colors of all terminals after a theme change."
   (dolist (buf (buffer-list))
     (with-current-buffer buf
       (when (and (derived-mode-p 'wterm-mode) wterm--term)
-        (wterm--set-palette wterm--term (wterm--palette))
+        (wterm--set-colors)
         (wterm--schedule-redraw)))))
 
 (add-hook 'enable-theme-functions #'wterm--update-palettes)

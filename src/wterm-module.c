@@ -19,6 +19,7 @@
 #include <emacs-module.h>
 #include <vterm.h>
 
+#include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -42,6 +43,11 @@ typedef struct
   int cols;
   VTermScreenCell cells[];
 } SbLine;
+
+typedef struct
+{
+  uint8_t r, g, b;
+} Rgb;
 
 typedef struct
 {
@@ -86,8 +92,15 @@ typedef struct
   char *out;
   size_t out_len, out_cap;
 
-  /* Colors 0-15 as Emacs color strings, from the current theme.  */
-  char palette[16][32];
+  /* Colors 0-15 from the current theme.  */
+  Rgb palette[16];
+  bool palette_set[16];
+
+  /* Emacs' default colors and the minimum contrast between the text and
+     its background (0 for no adjustment).  */
+  Rgb default_fg, default_bg;
+  bool defaults_set;
+  double min_contrast;
 } Term;
 
 /* ------------------------------------------------------------------ */
@@ -449,22 +462,92 @@ static const VTermStateFallbacks fallbacks = {
 /* ------------------------------------------------------------------ */
 /* Rendering                                                           */
 
-static emacs_value
-color_value (Term *t, emacs_env *env, const VTermColor *c)
+static Rgb
+color_rgb (Term *t, const VTermColor *c)
 {
   VTermColor col = *c;
-  char s[8];
 
   if (VTERM_COLOR_IS_INDEXED (&col) && col.indexed.idx < 16
-      && t->palette[col.indexed.idx][0])
-    {
-      const char *p = t->palette[col.indexed.idx];
-      return env->make_string (env, p, strlen (p));
-    }
+      && t->palette_set[col.indexed.idx])
+    return t->palette[col.indexed.idx];
   vterm_screen_convert_color_to_rgb (t->screen, &col);
-  snprintf (s, sizeof s, "#%02x%02x%02x", col.rgb.red, col.rgb.green,
-            col.rgb.blue);
+  return (Rgb) { col.rgb.red, col.rgb.green, col.rgb.blue };
+}
+
+static emacs_value
+rgb_value (emacs_env *env, Rgb c)
+{
+  char s[8];
+  snprintf (s, sizeof s, "#%02x%02x%02x", c.r, c.g, c.b);
   return env->make_string (env, s, 7);
+}
+
+static bool
+parse_rgb (const char *s, Rgb *c)
+{
+  unsigned r, g, b;
+  if (strlen (s) != 7 || sscanf (s, "#%2x%2x%2x", &r, &g, &b) != 3)
+    return false;
+  *c = (Rgb) { r, g, b };
+  return true;
+}
+
+/* Contrast adjustment, using the WCAG definitions of relative luminance
+   and contrast ratio.  */
+
+static double srgb_linear[256];
+
+static double
+luminance (Rgb c)
+{
+  return 0.2126 * srgb_linear[c.r] + 0.7152 * srgb_linear[c.g]
+    + 0.0722 * srgb_linear[c.b];
+}
+
+static double
+contrast (double l1, double l2)
+{
+  return l1 > l2 ? (l1 + 0.05) / (l2 + 0.05) : (l2 + 0.05) / (l1 + 0.05);
+}
+
+static Rgb
+mix (Rgb a, Rgb b, double k)
+{
+  return (Rgb) { lround (a.r + (b.r - a.r) * k),
+                 lround (a.g + (b.g - a.g) * k),
+                 lround (a.b + (b.b - a.b) * k) };
+}
+
+/* FG, moved towards black or white as little as possible so that it
+   contrasts with BG by at least RATIO.  */
+static Rgb
+ensure_contrast (Rgb fg, Rgb bg, double ratio)
+{
+  static const Rgb black = { 0, 0, 0 }, white = { 255, 255, 255 };
+  double lbg = luminance (bg);
+  Rgb target;
+  double lo = 0, hi = 1;
+
+  if (contrast (luminance (fg), lbg) >= ratio)
+    return fg;
+  /* Keep FG on its side of BG (darker or lighter) unless only the other
+     side gets far enough.  */
+  bool darker = luminance (fg) <= lbg;
+  if (contrast (darker ? 0 : 1, lbg) < ratio
+      && contrast (darker ? 1 : 0, lbg) > contrast (darker ? 0 : 1, lbg))
+    darker = !darker;
+  target = darker ? black : white;
+  if (contrast (luminance (target), lbg) < ratio)
+    return target;
+  for (int i = 0; i < 12; i++)
+    {
+      double k = (lo + hi) / 2;
+      if (contrast (luminance (mix (fg, target, k)), lbg) >= ratio)
+        hi = k;
+      else
+        lo = k;
+    }
+  return mix (fg, target, hi);
 }
 
 static bool
@@ -492,16 +575,31 @@ make_face (Term *t, emacs_env *env, const VTermScreenCell *c)
 {
   emacs_value a[14];
   int n = 0;
+  bool fg_default = VTERM_COLOR_IS_DEFAULT_FG (&c->fg);
+  bool bg_default = VTERM_COLOR_IS_DEFAULT_BG (&c->bg);
+  Rgb fg = fg_default ? t->default_fg : color_rgb (t, &c->fg);
+  Rgb bg = bg_default ? t->default_bg : color_rgb (t, &c->bg);
 
-  if (!VTERM_COLOR_IS_DEFAULT_FG (&c->fg))
+  /* Theme colors are trusted to work together; adjust only when the
+     terminal picked at least one of the two.  */
+  if (t->min_contrast > 1 && t->defaults_set && !(fg_default && bg_default))
+    {
+      Rgb adjusted = ensure_contrast (fg, bg, t->min_contrast);
+      if (adjusted.r != fg.r || adjusted.g != fg.g || adjusted.b != fg.b)
+        {
+          fg = adjusted;
+          fg_default = false;
+        }
+    }
+  if (!fg_default)
     {
       a[n++] = Kforeground;
-      a[n++] = color_value (t, env, &c->fg);
+      a[n++] = rgb_value (env, fg);
     }
-  if (!VTERM_COLOR_IS_DEFAULT_BG (&c->bg))
+  if (!bg_default)
     {
       a[n++] = Kbackground;
-      a[n++] = color_value (t, env, &c->bg);
+      a[n++] = rgb_value (env, bg);
     }
   if (c->attrs.bold)
     {
@@ -997,8 +1095,26 @@ Fwterm_focus (emacs_env *env, ptrdiff_t nargs, emacs_value *args, void *data)
   return take_output (t, env);
 }
 
-/* (wterm--set-palette TERM VECTOR): VECTOR holds 16 color strings (or nil)
-   used for the ANSI colors 0-15.  */
+/* Copy the "#rrggbb" string V into C.  Return false if V is nil or not
+   such a string.  */
+static bool
+value_rgb (emacs_env *env, emacs_value v, Rgb *c)
+{
+  char s[16];
+  ptrdiff_t size = sizeof s;
+
+  if (!env->is_not_nil (env, v))
+    return false;
+  if (!env->copy_string_contents (env, v, s, &size))
+    {
+      env->non_local_exit_clear (env);
+      return false;
+    }
+  return parse_rgb (s, c);
+}
+
+/* (wterm--set-palette TERM VECTOR): VECTOR holds 16 "#rrggbb" color
+   strings (or nil) used for the ANSI colors 0-15.  */
 static emacs_value
 Fwterm_set_palette (emacs_env *env, ptrdiff_t nargs, emacs_value *args,
                     void *data)
@@ -1012,15 +1128,36 @@ Fwterm_set_palette (emacs_env *env, ptrdiff_t nargs, emacs_value *args,
   for (int i = 0; i < 16; i++)
     {
       emacs_value v = env->vec_get (env, args[1], i);
-      ptrdiff_t size = sizeof t->palette[i];
-      t->palette[i][0] = '\0';
       if (failed (env))
         return Qnil;
-      if (env->is_not_nil (env, v)
-          && !env->copy_string_contents (env, v, t->palette[i], &size))
+      t->palette_set[i] = value_rgb (env, v, &t->palette[i]);
+    }
+  invalidate (t, 0, t->rows);
+  return Qnil;
+}
+
+/* (wterm--set-contrast TERM FG BG RATIO): FG and BG are Emacs' default
+   colors as "#rrggbb" strings, RATIO a float or nil for no adjustment.  */
+static emacs_value
+Fwterm_set_contrast (emacs_env *env, ptrdiff_t nargs, emacs_value *args,
+                     void *data)
+{
+  Term *t = get_term (env, args[0]);
+  (void) nargs;
+  (void) data;
+
+  if (!t)
+    return Qnil;
+  t->defaults_set = value_rgb (env, args[1], &t->default_fg)
+    && value_rgb (env, args[2], &t->default_bg);
+  t->min_contrast = 0;
+  if (env->is_not_nil (env, args[3]))
+    {
+      t->min_contrast = env->extract_float (env, args[3]);
+      if (failed (env))
         {
           env->non_local_exit_clear (env);
-          t->palette[i][0] = '\0';
+          t->min_contrast = 0;
         }
     }
   invalidate (t, 0, t->rows);
@@ -1160,6 +1297,12 @@ emacs_module_init (struct emacs_runtime *rt)
   Kstrike_through = global_sym (env, ":strike-through");
   Snewline = env->make_global_ref (env, env->make_string (env, "\n", 1));
 
+  for (int i = 0; i < 256; i++)
+    {
+      double v = i / 255.0;
+      srgb_linear[i] = v <= 0.04045 ? v / 12.92 : pow ((v + 0.055) / 1.055, 2.4);
+    }
+
   defun (env, "wterm--new", 3, 3, Fwterm_new,
          "Create a terminal: (wterm--new ROWS COLS SCROLLBACK).");
   defun (env, "wterm--write-input", 2, 2, Fwterm_write_input,
@@ -1178,6 +1321,8 @@ emacs_module_init (struct emacs_runtime *rt)
          "Report focus in (non-nil) or out.  Return bytes to send.");
   defun (env, "wterm--set-palette", 2, 2, Fwterm_set_palette,
          "Set the 16 ANSI colors of TERM from a vector of color strings.");
+  defun (env, "wterm--set-contrast", 4, 4, Fwterm_set_contrast,
+         "Set TERM's default colors and minimum text contrast.");
   defun (env, "wterm--clear-scrollback", 1, 1, Fwterm_clear_scrollback,
          "Discard TERM's scrollback.");
   defun (env, "wterm--pop-events", 1, 1, Fwterm_pop_events,
