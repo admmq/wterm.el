@@ -53,3 +53,7 @@ Most keys go to the terminal. `C-c`, `C-x`, `C-u`, `C-g`, `C-h`, `M-x` and
 - Lines already in the scrollback are not re-wrapped when the window width
   changes.
 - Mouse reporting to terminal programs is not implemented.
+
+## License
+
+GPL-3.0-or-later. See [LICENSE](LICENSE).
